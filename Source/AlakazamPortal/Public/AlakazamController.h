@@ -1,0 +1,140 @@
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Components/ActorComponent.h"
+#include "Engine/TextureRenderTarget2D.h"
+#include "IWebSocket.h"
+#include "AlakazamController.generated.h"
+
+UENUM(BlueprintType)
+enum class EAlakazamState : uint8
+{
+	Disconnected,
+	Connecting,
+	Authenticating,
+	Ready,
+	Error
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnAlakazamConnected);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAlakazamFrameReceived, UTexture2D*, StylizedFrame);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAlakazamError, const FString&, ErrorMessage);
+
+/**
+ * Alakazam Portal Controller
+ *
+ * Connects to Alakazam server and handles real-time stylization.
+ * Attach to any actor, configure the server URL and prompt, then call Connect().
+ */
+UCLASS(ClassGroup=(Alakazam), meta=(BlueprintSpawnableComponent))
+class ALAKAZAMPORTAL_API UAlakazamController : public UActorComponent
+{
+	GENERATED_BODY()
+
+public:
+	UAlakazamController();
+
+	// === Configuration ===
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam|Server")
+	FString ServerUrl = TEXT("ws://127.0.0.1:9001");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam|Style")
+	FString Prompt = TEXT("anime style, vibrant colors");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam|Style")
+	bool bEnhancePrompt = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam|Capture")
+	int32 CaptureWidth = 1280;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam|Capture")
+	int32 CaptureHeight = 720;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam|Capture")
+	int32 JpegQuality = 85;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam|Capture")
+	float TargetFPS = 30.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam|Capture")
+	class USceneCaptureComponent2D* SceneCaptureComponent;
+
+	// === Output ===
+
+	UPROPERTY(BlueprintReadOnly, Category = "Alakazam|Output")
+	UTexture2D* OutputTexture;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Alakazam|Output")
+	UTextureRenderTarget2D* CaptureRenderTarget;
+
+	// === State ===
+
+	UPROPERTY(BlueprintReadOnly, Category = "Alakazam|State")
+	EAlakazamState State = EAlakazamState::Disconnected;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Alakazam|State")
+	bool bIsStreaming = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Alakazam|Stats")
+	int32 FramesSent = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Alakazam|Stats")
+	int32 FramesReceived = 0;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Alakazam|Stats")
+	float CurrentFPS = 0.0f;
+
+	// === Events ===
+
+	UPROPERTY(BlueprintAssignable, Category = "Alakazam|Events")
+	FOnAlakazamConnected OnConnected;
+
+	UPROPERTY(BlueprintAssignable, Category = "Alakazam|Events")
+	FOnAlakazamFrameReceived OnFrameReceived;
+
+	UPROPERTY(BlueprintAssignable, Category = "Alakazam|Events")
+	FOnAlakazamError OnError;
+
+	// === Functions ===
+
+	UFUNCTION(BlueprintCallable, Category = "Alakazam")
+	void Connect();
+
+	UFUNCTION(BlueprintCallable, Category = "Alakazam")
+	void Disconnect();
+
+	UFUNCTION(BlueprintCallable, Category = "Alakazam")
+	void SetPrompt(const FString& NewPrompt);
+
+	UFUNCTION(BlueprintCallable, Category = "Alakazam")
+	void StartStreaming();
+
+	UFUNCTION(BlueprintCallable, Category = "Alakazam")
+	void StopStreaming();
+
+	UFUNCTION(BlueprintPure, Category = "Alakazam")
+	bool IsConnected() const;
+
+	UFUNCTION(BlueprintPure, Category = "Alakazam")
+	bool IsReady() const;
+
+protected:
+	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
+
+private:
+	TSharedPtr<IWebSocket> WebSocket;
+	FString SessionId;
+
+	float FrameTimer = 0.0f;
+	float FPSTimer = 0.0f;
+	int32 FPSFrameCount = 0;
+
+	TArray<uint8> ReceiveBuffer;
+
+	void SetupCapture();
+	void CaptureAndSendFrame();
+	void ProcessReceivedFrame(const void* Data, SIZE_T Size);
+};
