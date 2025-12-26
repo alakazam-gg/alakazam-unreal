@@ -15,9 +15,12 @@ public class AlakazamPortal : ModuleRules
 				"RenderCore",
 				"RHI",
 				"ImageWrapper",
-				"WebSockets",  // Use UE's native WebSocket
+				"WebSockets",
 				"Json",
-				"JsonUtilities"
+				"JsonUtilities",
+				"Slate",
+				"SlateCore",
+				"UMG"
 			}
 		);
 	}

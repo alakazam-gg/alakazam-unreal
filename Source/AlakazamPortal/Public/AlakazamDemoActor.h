@@ -6,11 +6,12 @@
 
 class UAlakazamController;
 class USceneCaptureComponent2D;
-class UStaticMeshComponent;
+class UTextureRenderTarget2D;
 
 /**
  * Drop-in demo actor for Alakazam Portal.
- * Place in level, hit Play, and see the stylized output on the quad.
+ * Displays side-by-side comparison: Original view (left) vs AI-stylized (right).
+ * Place in level, hit Play, and see the real-time stylization comparison.
  */
 UCLASS(BlueprintType)
 class ALAKAZAMPORTAL_API AAlakazamDemoActor : public AActor
@@ -20,28 +21,47 @@ class ALAKAZAMPORTAL_API AAlakazamDemoActor : public AActor
 public:
 	AAlakazamDemoActor();
 
-	// Alakazam controller
+	// Alakazam controller (handles capture and stylization)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alakazam")
 	UAlakazamController* AlakazamController;
 
-	// Captures the scene
+	// Scene capture for the "original" view (left side)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alakazam")
-	USceneCaptureComponent2D* SceneCapture;
+	USceneCaptureComponent2D* OriginalSceneCapture;
 
-	// Quad to display output
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alakazam")
-	UStaticMeshComponent* OutputQuad;
-
-	// Dynamic material for output display
+	// Render target for original view
 	UPROPERTY(BlueprintReadOnly, Category = "Alakazam")
-	UMaterialInstanceDynamic* OutputMaterial;
+	UTextureRenderTarget2D* OriginalRenderTarget;
+
+	// Dynamic materials for display
+	UPROPERTY(BlueprintReadOnly, Category = "Alakazam")
+	UMaterialInstanceDynamic* OriginalMaterial;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Alakazam")
+	UMaterialInstanceDynamic* StylizedMaterial;
 
 	// Auto-connect on play
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam")
 	bool bAutoConnect = true;
 
+	// Show side-by-side comparison (false = stylized only fullscreen)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam")
+	bool bSideBySide = true;
+
+	// Capture resolution
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam")
+	int32 CaptureWidth = 1280;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam")
+	int32 CaptureHeight = 720;
+
+	UFUNCTION(BlueprintCallable, Category = "Alakazam")
+	void ToggleSideBySide();
+
 protected:
 	virtual void BeginPlay() override;
+	virtual void Tick(float DeltaTime) override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	UFUNCTION()
 	void OnFrameReceived(UTexture2D* StylizedFrame);
@@ -51,4 +71,15 @@ protected:
 
 	UFUNCTION()
 	void OnError(const FString& ErrorMessage);
+
+private:
+	void CreateSideBySideWidget();
+	void UpdateOriginalCapture();
+	void SyncCaptureWithPlayerCamera(USceneCaptureComponent2D* Capture);
+
+	TSharedPtr<class SWidget> DisplayWidget;
+	TSharedPtr<class SImage> OriginalImageWidget;
+	TSharedPtr<class SImage> StylizedImageWidget;
+	FSlateBrush OriginalBrush;
+	FSlateBrush StylizedBrush;
 };

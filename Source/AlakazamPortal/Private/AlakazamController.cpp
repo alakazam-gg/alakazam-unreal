@@ -1,6 +1,10 @@
 #include "AlakazamController.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Components/SceneCaptureComponent2D.h"
+#include "Camera/CameraComponent.h"
+#include "Camera/PlayerCameraManager.h"
+#include "GameFramework/PlayerController.h"
+#include "Kismet/GameplayStatics.h"
 #include "ImageUtils.h"
 #include "IImageWrapper.h"
 #include "IImageWrapperModule.h"
@@ -74,9 +78,27 @@ void UAlakazamController::SetupCapture()
 	OutputTexture = UTexture2D::CreateTransient(CaptureWidth, CaptureHeight, PF_B8G8R8A8);
 	OutputTexture->UpdateResource();
 
-	// If SceneCaptureComponent is assigned, set up its render target
-	if (SceneCaptureComponent)
+	// Auto-create scene capture for player camera mode
+	if (bCaptureFromPlayerCamera)
 	{
+		AActor* Owner = GetOwner();
+		if (Owner)
+		{
+			AutoSceneCapture = NewObject<USceneCaptureComponent2D>(Owner, TEXT("AlakazamAutoCapture"));
+			AutoSceneCapture->RegisterComponent();
+			AutoSceneCapture->AttachToComponent(Owner->GetRootComponent(), FAttachmentTransformRules::KeepRelativeTransform);
+			AutoSceneCapture->TextureTarget = CaptureRenderTarget;
+			AutoSceneCapture->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
+			AutoSceneCapture->bCaptureEveryFrame = false; // We'll capture manually
+			AutoSceneCapture->bCaptureOnMovement = false;
+			AutoSceneCapture->bAlwaysPersistRenderingState = true;
+
+			UE_LOG(LogTemp, Log, TEXT("Alakazam: Created auto scene capture for player camera"));
+		}
+	}
+	else if (SceneCaptureComponent)
+	{
+		// Use manually assigned scene capture
 		SceneCaptureComponent->TextureTarget = CaptureRenderTarget;
 	}
 
@@ -245,9 +267,42 @@ bool UAlakazamController::IsReady() const
 	return State == EAlakazamState::Ready;
 }
 
+void UAlakazamController::SyncCaptureWithPlayerCamera()
+{
+	if (!bCaptureFromPlayerCamera || !AutoSceneCapture) return;
+
+	// Get player camera manager
+	APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
+	if (!PC) return;
+
+	APlayerCameraManager* CameraManager = PC->PlayerCameraManager;
+	if (!CameraManager) return;
+
+	// Sync position and rotation with player camera
+	FVector CameraLocation = CameraManager->GetCameraLocation();
+	FRotator CameraRotation = CameraManager->GetCameraRotation();
+
+	AutoSceneCapture->SetWorldLocationAndRotation(CameraLocation, CameraRotation);
+
+	// Sync FOV
+	AutoSceneCapture->FOVAngle = CameraManager->GetFOVAngle();
+}
+
 void UAlakazamController::CaptureAndSendFrame()
 {
 	if (!WebSocket.IsValid() || !WebSocket->IsConnected() || !CaptureRenderTarget) return;
+
+	// Sync capture component with player camera before capturing
+	if (bCaptureFromPlayerCamera)
+	{
+		SyncCaptureWithPlayerCamera();
+
+		// Trigger manual capture
+		if (AutoSceneCapture)
+		{
+			AutoSceneCapture->CaptureScene();
+		}
+	}
 
 	// Read pixels from render target
 	FTextureRenderTargetResource* RenderTargetResource = CaptureRenderTarget->GameThread_GetRenderTargetResource();

@@ -57,6 +57,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam|Capture")
 	float TargetFPS = 30.0f;
 
+	/** If true, automatically capture from the player's camera view (like Unity). If false, use manually assigned SceneCaptureComponent. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam|Capture")
+	bool bCaptureFromPlayerCamera = true;
+
+	/** Optional: Manually assign a SceneCaptureComponent2D. Only used if bCaptureFromPlayerCamera is false. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam|Capture")
 	class USceneCaptureComponent2D* SceneCaptureComponent;
 
@@ -134,7 +139,12 @@ private:
 
 	TArray<uint8> ReceiveBuffer;
 
+	// Auto-created scene capture for player camera mode
+	UPROPERTY()
+	class USceneCaptureComponent2D* AutoSceneCapture;
+
 	void SetupCapture();
 	void CaptureAndSendFrame();
 	void ProcessReceivedFrame(const void* Data, SIZE_T Size);
+	void SyncCaptureWithPlayerCamera();
 };
