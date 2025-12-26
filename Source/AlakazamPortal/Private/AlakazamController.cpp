@@ -14,6 +14,8 @@
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "Misc/Base64.h"
+#include "RenderGraphUtils.h"
+#include "RHICommandList.h"
 
 UAlakazamController::UAlakazamController()
 {
@@ -44,8 +46,11 @@ void UAlakazamController::TickComponent(float DeltaTime, ELevelTick TickType, FA
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
+	// Process any pending async readback
+	ProcessAsyncReadback();
+
 	// Capture and send frames at target FPS
-	if (bIsStreaming && State == EAlakazamState::Ready)
+	if (bIsStreaming && State == EAlakazamState::Ready && !bReadbackPending)
 	{
 		FrameTimer += DeltaTime;
 		float FrameInterval = 1.0f / TargetFPS;
@@ -210,6 +215,15 @@ void UAlakazamController::Disconnect()
 		WebSocket.Reset();
 	}
 
+	// Cleanup GPU readback
+	if (GPUReadback)
+	{
+		delete GPUReadback;
+		GPUReadback = nullptr;
+	}
+	bReadbackPending = false;
+	bReadbackDataReady = false;
+
 	State = EAlakazamState::Disconnected;
 	bIsStreaming = false;
 	FramesSent = 0;
@@ -291,6 +305,7 @@ void UAlakazamController::SyncCaptureWithPlayerCamera()
 void UAlakazamController::CaptureAndSendFrame()
 {
 	if (!WebSocket.IsValid() || !WebSocket->IsConnected() || !CaptureRenderTarget) return;
+	if (bReadbackPending) return; // Still waiting for previous readback
 
 	// Sync capture component with player camera before capturing
 	if (bCaptureFromPlayerCamera)
@@ -304,34 +319,98 @@ void UAlakazamController::CaptureAndSendFrame()
 		}
 	}
 
-	// Read pixels from render target
+	// Get render target resource
 	FTextureRenderTargetResource* RenderTargetResource = CaptureRenderTarget->GameThread_GetRenderTargetResource();
 	if (!RenderTargetResource) return;
 
-	TArray<FColor> Pixels;
-	RenderTargetResource->ReadPixels(Pixels);
-
-	if (Pixels.Num() == 0) return;
-
-	// Encode as JPEG
-	IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
-	TSharedPtr<IImageWrapper> ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::JPEG);
-
-	if (ImageWrapper->SetRaw(Pixels.GetData(), Pixels.Num() * sizeof(FColor), CaptureWidth, CaptureHeight, ERGBFormat::BGRA, 8))
+	// Create GPU readback if needed
+	if (!GPUReadback)
 	{
-		TArray64<uint8> CompressedData = ImageWrapper->GetCompressed(JpegQuality);
-		if (CompressedData.Num() > 0)
-		{
-			// Send as binary WebSocket message
-			WebSocket->Send(CompressedData.GetData(), CompressedData.Num(), true);
-			FramesSent++;
+		GPUReadback = new FRHIGPUTextureReadback(TEXT("AlakazamReadback"));
+	}
 
-			if (FramesSent <= 5 || FramesSent % 100 == 0)
+	// Enqueue async readback on render thread
+	FRHITexture* TextureRHI = RenderTargetResource->GetRenderTargetTexture();
+	if (!TextureRHI) return;
+
+	ENQUEUE_RENDER_COMMAND(AlakazamAsyncReadback)(
+		[this, TextureRHI, RenderTargetResource](FRHICommandListImmediate& RHICmdList)
+		{
+			GPUReadback->EnqueueCopy(RHICmdList, TextureRHI, FIntVector(0, 0, 0), 0, FIntVector(CaptureWidth, CaptureHeight, 1));
+		});
+
+	bReadbackPending = true;
+}
+
+void UAlakazamController::ProcessAsyncReadback()
+{
+	// Check if we have data ready to send (copied from render thread)
+	if (bReadbackDataReady)
+	{
+		FScopeLock Lock(&ReadbackLock);
+
+		if (ReadbackPixels.Num() > 0 && WebSocket.IsValid() && WebSocket->IsConnected())
+		{
+			IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
+			TSharedPtr<IImageWrapper> ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::JPEG);
+
+			if (ImageWrapper->SetRaw(ReadbackPixels.GetData(), ReadbackPixels.Num() * sizeof(FColor), CaptureWidth, CaptureHeight, ERGBFormat::BGRA, 8))
 			{
-				UE_LOG(LogTemp, Log, TEXT("Alakazam: Sent frame %d (%lld bytes)"), FramesSent, CompressedData.Num());
+				TArray64<uint8> CompressedData = ImageWrapper->GetCompressed(JpegQuality);
+				if (CompressedData.Num() > 0)
+				{
+					WebSocket->Send(CompressedData.GetData(), CompressedData.Num(), true);
+					FramesSent++;
+
+					if (FramesSent <= 5 || FramesSent % 100 == 0)
+					{
+						UE_LOG(LogTemp, Log, TEXT("Alakazam: Sent frame %d (%lld bytes)"), FramesSent, CompressedData.Num());
+					}
+				}
 			}
 		}
+
+		bReadbackDataReady = false;
+		bReadbackPending = false;
+		return;
 	}
+
+	if (!bReadbackPending || !GPUReadback) return;
+
+	// Check if readback is ready (this is safe to call from game thread)
+	if (!GPUReadback->IsReady()) return;
+
+	// Copy data on render thread, then signal game thread
+	int32 Width = CaptureWidth;
+	int32 Height = CaptureHeight;
+	FRHIGPUTextureReadback* Readback = GPUReadback;
+	TArray<FColor>* PixelsPtr = &ReadbackPixels;
+	bool* DataReadyPtr = &bReadbackDataReady;
+	FCriticalSection* LockPtr = &ReadbackLock;
+
+	ENQUEUE_RENDER_COMMAND(AlakazamReadbackCopy)(
+		[Readback, Width, Height, PixelsPtr, DataReadyPtr, LockPtr](FRHICommandListImmediate& RHICmdList)
+		{
+			int32 RowPitchInPixels = 0;
+			const FColor* PixelData = static_cast<const FColor*>(Readback->Lock(RowPitchInPixels));
+
+			if (PixelData && RowPitchInPixels > 0)
+			{
+				FScopeLock Lock(LockPtr);
+				PixelsPtr->SetNum(Width * Height);
+				for (int32 Row = 0; Row < Height; Row++)
+				{
+					FMemory::Memcpy(
+						PixelsPtr->GetData() + Row * Width,
+						PixelData + Row * RowPitchInPixels,
+						Width * sizeof(FColor)
+					);
+				}
+				*DataReadyPtr = true;
+			}
+
+			Readback->Unlock();
+		});
 }
 
 void UAlakazamController::ProcessReceivedFrame(const void* Data, SIZE_T Size)

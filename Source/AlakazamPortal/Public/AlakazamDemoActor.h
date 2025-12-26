@@ -5,8 +5,6 @@
 #include "AlakazamDemoActor.generated.h"
 
 class UAlakazamController;
-class USceneCaptureComponent2D;
-class UTextureRenderTarget2D;
 
 /**
  * Drop-in demo actor for Alakazam Portal.
@@ -24,14 +22,6 @@ public:
 	// Alakazam controller (handles capture and stylization)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alakazam")
 	UAlakazamController* AlakazamController;
-
-	// Scene capture for the "original" view (left side)
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Alakazam")
-	USceneCaptureComponent2D* OriginalSceneCapture;
-
-	// Render target for original view
-	UPROPERTY(BlueprintReadOnly, Category = "Alakazam")
-	UTextureRenderTarget2D* OriginalRenderTarget;
 
 	// Dynamic materials for display
 	UPROPERTY(BlueprintReadOnly, Category = "Alakazam")
@@ -74,12 +64,12 @@ protected:
 
 private:
 	void CreateSideBySideWidget();
-	void UpdateOriginalCapture();
-	void SyncCaptureWithPlayerCamera(USceneCaptureComponent2D* Capture);
 
 	TSharedPtr<class SWidget> DisplayWidget;
 	TSharedPtr<class SImage> OriginalImageWidget;
 	TSharedPtr<class SImage> StylizedImageWidget;
-	FSlateBrush OriginalBrush;
-	FSlateBrush StylizedBrush;
+
+	// Use TSharedPtr for brushes to ensure proper lifetime
+	TSharedPtr<FSlateBrush> OriginalBrush;
+	TSharedPtr<FSlateBrush> StylizedBrush;
 };

@@ -4,6 +4,7 @@
 #include "Components/ActorComponent.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "IWebSocket.h"
+#include "RHIGPUReadback.h"
 #include "AlakazamController.generated.h"
 
 UENUM(BlueprintType)
@@ -143,8 +144,16 @@ private:
 	UPROPERTY()
 	class USceneCaptureComponent2D* AutoSceneCapture;
 
+	// Async GPU readback to avoid blocking game thread
+	FRHIGPUTextureReadback* GPUReadback = nullptr;
+	bool bReadbackPending = false;
+	bool bReadbackDataReady = false;
+	TArray<FColor> ReadbackPixels;
+	FCriticalSection ReadbackLock;
+
 	void SetupCapture();
 	void CaptureAndSendFrame();
+	void ProcessAsyncReadback();
 	void ProcessReceivedFrame(const void* Data, SIZE_T Size);
 	void SyncCaptureWithPlayerCamera();
 };

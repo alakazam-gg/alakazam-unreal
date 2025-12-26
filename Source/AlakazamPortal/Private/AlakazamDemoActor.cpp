@@ -20,27 +20,17 @@ AAlakazamDemoActor::AAlakazamDemoActor()
 	// Create root component
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 
-	// Create Alakazam Controller
+	// Create Alakazam Controller - uses auto-capture from player camera
 	AlakazamController = CreateDefaultSubobject<UAlakazamController>(TEXT("AlakazamController"));
-
-	// Create scene capture for original view (separate from controller's capture)
-	OriginalSceneCapture = CreateDefaultSubobject<USceneCaptureComponent2D>(TEXT("OriginalSceneCapture"));
-	OriginalSceneCapture->SetupAttachment(RootComponent);
-	OriginalSceneCapture->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
-	OriginalSceneCapture->bCaptureEveryFrame = false;
-	OriginalSceneCapture->bCaptureOnMovement = false;
-	OriginalSceneCapture->bAlwaysPersistRenderingState = true;
 }
 
 void AAlakazamDemoActor::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Create render target for original view
-	OriginalRenderTarget = NewObject<UTextureRenderTarget2D>(this);
-	OriginalRenderTarget->InitCustomFormat(CaptureWidth, CaptureHeight, PF_B8G8R8A8, false);
-	OriginalRenderTarget->UpdateResourceImmediate();
-	OriginalSceneCapture->TextureTarget = OriginalRenderTarget;
+	// Initialize brushes
+	OriginalBrush = MakeShared<FSlateBrush>();
+	StylizedBrush = MakeShared<FSlateBrush>();
 
 	// Create the side-by-side display widget
 	CreateSideBySideWidget();
@@ -70,14 +60,22 @@ void AAlakazamDemoActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		DisplayWidget.Reset();
 	}
 
+	OriginalImageWidget.Reset();
+	StylizedImageWidget.Reset();
+	OriginalBrush.Reset();
+	StylizedBrush.Reset();
+
 	Super::EndPlay(EndPlayReason);
 }
 
 void AAlakazamDemoActor::CreateSideBySideWidget()
 {
-	// Initialize brushes
-	OriginalBrush.SetResourceObject(OriginalRenderTarget);
-	OriginalBrush.ImageSize = FVector2D(CaptureWidth, CaptureHeight);
+	// Set up original brush to use controller's capture render target
+	if (AlakazamController && AlakazamController->CaptureRenderTarget)
+	{
+		OriginalBrush->SetResourceObject(AlakazamController->CaptureRenderTarget);
+		OriginalBrush->ImageSize = FVector2D(CaptureWidth, CaptureHeight);
+	}
 
 	// Create the side-by-side layout using Slate
 	DisplayWidget = SNew(SOverlay)
@@ -92,7 +90,7 @@ void AAlakazamDemoActor::CreateSideBySideWidget()
 				+ SOverlay::Slot()
 				[
 					SAssignNew(OriginalImageWidget, SImage)
-					.Image(&OriginalBrush)
+					.Image(OriginalBrush.Get())
 				]
 				+ SOverlay::Slot()
 				.HAlign(HAlign_Center)
@@ -115,7 +113,7 @@ void AAlakazamDemoActor::CreateSideBySideWidget()
 				+ SOverlay::Slot()
 				[
 					SAssignNew(StylizedImageWidget, SImage)
-					.Image(&StylizedBrush)
+					.Image(StylizedBrush.Get())
 				]
 				+ SOverlay::Slot()
 				.HAlign(HAlign_Center)
@@ -141,41 +139,21 @@ void AAlakazamDemoActor::CreateSideBySideWidget()
 	UE_LOG(LogTemp, Log, TEXT("Alakazam Demo: Created side-by-side display widget"));
 }
 
-void AAlakazamDemoActor::SyncCaptureWithPlayerCamera(USceneCaptureComponent2D* Capture)
-{
-	if (!Capture) return;
-
-	APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
-	if (!PC) return;
-
-	APlayerCameraManager* CameraManager = PC->PlayerCameraManager;
-	if (!CameraManager) return;
-
-	FVector CameraLocation = CameraManager->GetCameraLocation();
-	FRotator CameraRotation = CameraManager->GetCameraRotation();
-
-	Capture->SetWorldLocationAndRotation(CameraLocation, CameraRotation);
-	Capture->FOVAngle = CameraManager->GetFOVAngle();
-}
-
-void AAlakazamDemoActor::UpdateOriginalCapture()
-{
-	// Sync with player camera and capture
-	SyncCaptureWithPlayerCamera(OriginalSceneCapture);
-	OriginalSceneCapture->CaptureScene();
-}
-
 void AAlakazamDemoActor::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	// Update original view capture each frame
-	UpdateOriginalCapture();
-
-	// Update the brush to reflect the render target
-	if (OriginalRenderTarget)
+	// Update original brush to show controller's capture render target
+	// The controller captures the scene, we just display it
+	if (AlakazamController && AlakazamController->CaptureRenderTarget && OriginalBrush.IsValid())
 	{
-		OriginalBrush.SetResourceObject(OriginalRenderTarget);
+		OriginalBrush->SetResourceObject(AlakazamController->CaptureRenderTarget);
+
+		// Force Slate to redraw by invalidating the image
+		if (OriginalImageWidget.IsValid())
+		{
+			OriginalImageWidget->SetImage(OriginalBrush.Get());
+		}
 	}
 }
 
@@ -187,15 +165,16 @@ void AAlakazamDemoActor::OnConnected()
 
 void AAlakazamDemoActor::OnFrameReceived(UTexture2D* StylizedFrame)
 {
-	if (StylizedFrame)
+	if (StylizedFrame && StylizedBrush.IsValid())
 	{
 		// Update the stylized brush with the new frame
-		StylizedBrush.SetResourceObject(StylizedFrame);
-		StylizedBrush.ImageSize = FVector2D(StylizedFrame->GetSizeX(), StylizedFrame->GetSizeY());
+		StylizedBrush->SetResourceObject(StylizedFrame);
+		StylizedBrush->ImageSize = FVector2D(StylizedFrame->GetSizeX(), StylizedFrame->GetSizeY());
 
+		// Force Slate to redraw
 		if (StylizedImageWidget.IsValid())
 		{
-			StylizedImageWidget->SetImage(&StylizedBrush);
+			StylizedImageWidget->SetImage(StylizedBrush.Get());
 		}
 
 		static int32 LogCount = 0;
@@ -216,7 +195,5 @@ void AAlakazamDemoActor::OnError(const FString& ErrorMessage)
 void AAlakazamDemoActor::ToggleSideBySide()
 {
 	bSideBySide = !bSideBySide;
-
-	// TODO: Implement toggle between side-by-side and fullscreen stylized
 	UE_LOG(LogTemp, Log, TEXT("Alakazam Demo: Side-by-side mode: %s"), bSideBySide ? TEXT("ON") : TEXT("OFF"));
 }
