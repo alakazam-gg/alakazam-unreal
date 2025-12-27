@@ -1,4 +1,5 @@
 #include "AlakazamController.h"
+#include "AlakazamAuth.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Components/SceneCaptureComponent2D.h"
 #include "Camera/CameraComponent.h"
@@ -130,10 +131,24 @@ void UAlakazamController::Connect()
 		UE_LOG(LogTemp, Log, TEXT("Alakazam: WebSocket connected, sending auth..."));
 		State = EAlakazamState::Authenticating;
 
-		// Send auth message
+		// Check for API key
+		UAlakazamAuth* Auth = UAlakazamAuth::Get();
+		FString ApiKey = Auth->GetApiKey();
+		if (ApiKey.IsEmpty())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("Alakazam: No API key configured"));
+			State = EAlakazamState::Error;
+			Auth->HandleAuthFailed(TEXT("No API key configured. Configure in Project Settings > Plugins > Alakazam Portal."));
+			OnError.Broadcast(TEXT("No API key configured"));
+			WebSocket->Close();
+			return;
+		}
+
+		// Send auth message with API key
 		TSharedPtr<FJsonObject> AuthMsg = MakeShareable(new FJsonObject);
 		AuthMsg->SetStringField(TEXT("type"), TEXT("auth"));
 		AuthMsg->SetStringField(TEXT("prompt"), Prompt);
+		AuthMsg->SetStringField(TEXT("api_key"), ApiKey);
 		AuthMsg->SetBoolField(TEXT("enhance"), bEnhancePrompt);
 
 		FString AuthStr;
@@ -170,6 +185,24 @@ void UAlakazamController::Connect()
 			{
 				SessionId = JsonMsg->GetStringField(TEXT("session_id"));
 				UE_LOG(LogTemp, Log, TEXT("Alakazam: Ready! Session: %s"), *SessionId);
+
+				// Process usage info
+				const TSharedPtr<FJsonObject>* UsageObj;
+				if (JsonMsg->TryGetObjectField(TEXT("usage"), UsageObj))
+				{
+					int32 SecondsUsed = (*UsageObj)->GetIntegerField(TEXT("seconds_used"));
+					int32 SecondsLimit = (*UsageObj)->GetIntegerField(TEXT("seconds_limit"));
+					int32 SecondsRemaining = (*UsageObj)->GetIntegerField(TEXT("seconds_remaining"));
+					UAlakazamAuth::Get()->UpdateUsage(SecondsUsed, SecondsLimit, SecondsRemaining);
+				}
+
+				// Handle server warning (80%+ usage)
+				FString Warning;
+				if (JsonMsg->TryGetStringField(TEXT("warning"), Warning))
+				{
+					UAlakazamAuth::Get()->HandleWarning(Warning);
+				}
+
 				State = EAlakazamState::Ready;
 				OnConnected.Broadcast();
 			}
@@ -177,6 +210,7 @@ void UAlakazamController::Connect()
 			{
 				FString ErrorMsg = JsonMsg->GetStringField(TEXT("message"));
 				UE_LOG(LogTemp, Error, TEXT("Alakazam: Server error: %s"), *ErrorMsg);
+				UAlakazamAuth::Get()->HandleAuthFailed(ErrorMsg);
 				State = EAlakazamState::Error;
 				OnError.Broadcast(ErrorMsg);
 			}
@@ -209,23 +243,28 @@ void UAlakazamController::Connect()
 
 void UAlakazamController::Disconnect()
 {
+	// Stop streaming first to prevent new captures
+	bIsStreaming = false;
+	State = EAlakazamState::Disconnected;
+
 	if (WebSocket.IsValid())
 	{
 		WebSocket->Close();
 		WebSocket.Reset();
 	}
 
-	// Cleanup GPU readback
+	// Flush render commands and wait for GPU to finish before cleanup
 	if (GPUReadback)
 	{
+		// Ensure no pending render commands are using the readback
+		FlushRenderingCommands();
+
 		delete GPUReadback;
 		GPUReadback = nullptr;
 	}
 	bReadbackPending = false;
 	bReadbackDataReady = false;
 
-	State = EAlakazamState::Disconnected;
-	bIsStreaming = false;
 	FramesSent = 0;
 	FramesReceived = 0;
 
@@ -304,6 +343,8 @@ void UAlakazamController::SyncCaptureWithPlayerCamera()
 
 void UAlakazamController::CaptureAndSendFrame()
 {
+	// Early exit if not streaming (prevents captures during shutdown)
+	if (!bIsStreaming || State != EAlakazamState::Ready) return;
 	if (!WebSocket.IsValid() || !WebSocket->IsConnected() || !CaptureRenderTarget) return;
 	if (bReadbackPending) return; // Still waiting for previous readback
 
@@ -333,10 +374,18 @@ void UAlakazamController::CaptureAndSendFrame()
 	FRHITexture* TextureRHI = RenderTargetResource->GetRenderTargetTexture();
 	if (!TextureRHI) return;
 
+	// Capture local copies for lambda (avoid accessing 'this' members after potential destruction)
+	FRHIGPUTextureReadback* LocalReadback = GPUReadback;
+	int32 LocalWidth = CaptureWidth;
+	int32 LocalHeight = CaptureHeight;
+
 	ENQUEUE_RENDER_COMMAND(AlakazamAsyncReadback)(
-		[this, TextureRHI, RenderTargetResource](FRHICommandListImmediate& RHICmdList)
+		[LocalReadback, TextureRHI, LocalWidth, LocalHeight](FRHICommandListImmediate& RHICmdList)
 		{
-			GPUReadback->EnqueueCopy(RHICmdList, TextureRHI, FIntVector(0, 0, 0), 0, FIntVector(CaptureWidth, CaptureHeight, 1));
+			if (LocalReadback)
+			{
+				LocalReadback->EnqueueCopy(RHICmdList, TextureRHI, FIntVector(0, 0, 0), 0, FIntVector(LocalWidth, LocalHeight, 1));
+			}
 		});
 
 	bReadbackPending = true;
@@ -344,6 +393,9 @@ void UAlakazamController::CaptureAndSendFrame()
 
 void UAlakazamController::ProcessAsyncReadback()
 {
+	// Early exit if not streaming (prevents processing during shutdown)
+	if (!bIsStreaming) return;
+
 	// Check if we have data ready to send (copied from render thread)
 	if (bReadbackDataReady)
 	{

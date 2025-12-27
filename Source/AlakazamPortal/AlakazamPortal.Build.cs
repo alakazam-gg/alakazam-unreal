@@ -20,8 +20,23 @@ public class AlakazamPortal : ModuleRules
 				"JsonUtilities",
 				"Slate",
 				"SlateCore",
-				"UMG"
+				"UMG",
+				"DeveloperSettings",
+				"InputCore"
 			}
 		);
+
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.AddRange(
+				new string[]
+				{
+					"UnrealEd",
+					"LevelEditor",
+					"EditorStyle",
+					"ToolMenus"
+				}
+			);
+		}
 	}
 }
