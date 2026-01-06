@@ -34,7 +34,8 @@ void UAlakazamController::BeginPlay()
 	// Load WebSockets module
 	FModuleManager::LoadModuleChecked<FWebSocketsModule>("WebSockets");
 
-	SetupCapture();
+	// DON'T setup capture here - wait until streaming actually starts
+	// This allows extraction-only connections without capture overhead
 }
 
 void UAlakazamController::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -75,6 +76,8 @@ void UAlakazamController::TickComponent(float DeltaTime, ELevelTick TickType, FA
 
 void UAlakazamController::SetupCapture()
 {
+	if (bCaptureSetupDone) return; // Already set up
+
 	// Create render target for capture
 	CaptureRenderTarget = NewObject<UTextureRenderTarget2D>(this);
 	CaptureRenderTarget->InitCustomFormat(CaptureWidth, CaptureHeight, PF_B8G8R8A8, false);
@@ -108,6 +111,7 @@ void UAlakazamController::SetupCapture()
 		SceneCaptureComponent->TextureTarget = CaptureRenderTarget;
 	}
 
+	bCaptureSetupDone = true;
 	UE_LOG(LogTemp, Log, TEXT("Alakazam: Capture setup complete (%dx%d)"), CaptureWidth, CaptureHeight);
 }
 
@@ -204,6 +208,14 @@ void UAlakazamController::Connect()
 				}
 
 				State = EAlakazamState::Ready;
+
+				// If we have a pending image for extraction, send it now
+				if (bExtractionOnlyMode && PendingStyleImage)
+				{
+					UE_LOG(LogTemp, Log, TEXT("Alakazam: Extraction-only mode - sending pending image"));
+					SendPendingImageForExtraction();
+				}
+
 				OnConnected.Broadcast();
 			}
 			else if (Type == TEXT("error"))
@@ -213,6 +225,16 @@ void UAlakazamController::Connect()
 				UAlakazamAuth::Get()->HandleAuthFailed(ErrorMsg);
 				State = EAlakazamState::Error;
 				OnError.Broadcast(ErrorMsg);
+			}
+			else if (Type == TEXT("style_extracted"))
+			{
+				FString ExtractedPrompt = JsonMsg->GetStringField(TEXT("prompt"));
+				UE_LOG(LogTemp, Log, TEXT("Alakazam: Style extracted: %s"), *ExtractedPrompt);
+				Prompt = ExtractedPrompt;
+				bIsExtractingStyle = false;
+				bIsUsingImageStyle = true;
+				PendingStyleImage = nullptr;
+				OnStyleExtracted.Broadcast(ExtractedPrompt);
 			}
 		}
 	});
@@ -245,6 +267,8 @@ void UAlakazamController::Disconnect()
 {
 	// Stop streaming first to prevent new captures
 	bIsStreaming = false;
+	bIsExtractingStyle = false;
+	bExtractionOnlyMode = false;
 	State = EAlakazamState::Disconnected;
 
 	if (WebSocket.IsValid())
@@ -264,6 +288,7 @@ void UAlakazamController::Disconnect()
 	}
 	bReadbackPending = false;
 	bReadbackDataReady = false;
+	PendingStyleImage = nullptr;
 
 	FramesSent = 0;
 	FramesReceived = 0;
@@ -291,10 +316,103 @@ void UAlakazamController::SetPrompt(const FString& NewPrompt)
 	}
 }
 
+void UAlakazamController::SetStyleFromImage(UTexture2D* ReferenceImage)
+{
+	if (!ReferenceImage)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Alakazam: Reference image is null"));
+		return;
+	}
+
+	if (!WebSocket.IsValid() || !WebSocket->IsConnected() || State != EAlakazamState::Ready)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Alakazam: Not ready to set style from image"));
+		return;
+	}
+
+	// Set extracting flag
+	bIsExtractingStyle = true;
+
+	// Read texture data
+	FTexture2DMipMap& Mip = ReferenceImage->GetPlatformData()->Mips[0];
+	int32 Width = Mip.SizeX;
+	int32 Height = Mip.SizeY;
+
+	const void* TextureData = Mip.BulkData.LockReadOnly();
+	if (!TextureData)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Alakazam: Failed to lock texture data"));
+		bIsExtractingStyle = false;
+		return;
+	}
+
+	// Encode to JPEG
+	IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
+	TSharedPtr<IImageWrapper> ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::JPEG);
+
+	if (ImageWrapper->SetRaw(TextureData, Width * Height * 4, Width, Height, ERGBFormat::BGRA, 8))
+	{
+		TArray64<uint8> JpegData = ImageWrapper->GetCompressed(90);
+		Mip.BulkData.Unlock();
+
+		if (JpegData.Num() > 0)
+		{
+			// Convert to base64
+			FString Base64Data = FBase64::Encode(JpegData.GetData(), JpegData.Num());
+			SetStyleFromBase64(Base64Data);
+			UE_LOG(LogTemp, Log, TEXT("Alakazam: Sending reference image for style extraction (%lld bytes)"), JpegData.Num());
+		}
+		else
+		{
+			bIsExtractingStyle = false;
+		}
+	}
+	else
+	{
+		Mip.BulkData.Unlock();
+		bIsExtractingStyle = false;
+		UE_LOG(LogTemp, Error, TEXT("Alakazam: Failed to encode reference image"));
+	}
+}
+
+void UAlakazamController::SetStyleFromBase64(const FString& Base64ImageData)
+{
+	if (Base64ImageData.IsEmpty())
+	{
+		UE_LOG(LogTemp, Error, TEXT("Alakazam: Base64 image data is empty"));
+		return;
+	}
+
+	if (!WebSocket.IsValid() || !WebSocket->IsConnected() || State != EAlakazamState::Ready)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Alakazam: Not ready to set style from image"));
+		return;
+	}
+
+	TSharedPtr<FJsonObject> ImagePromptMsg = MakeShareable(new FJsonObject);
+	ImagePromptMsg->SetStringField(TEXT("type"), TEXT("image_prompt"));
+	ImagePromptMsg->SetStringField(TEXT("image_data"), Base64ImageData);
+	ImagePromptMsg->SetBoolField(TEXT("enhance"), bEnhancePrompt);
+
+	FString MsgStr;
+	TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&MsgStr);
+	FJsonSerializer::Serialize(ImagePromptMsg.ToSharedRef(), Writer);
+
+	WebSocket->Send(MsgStr);
+	UE_LOG(LogTemp, Log, TEXT("Alakazam: Sent image_prompt message for style extraction"));
+}
+
 void UAlakazamController::StartStreaming()
 {
 	if (State == EAlakazamState::Ready)
 	{
+		// Setup capture if not done yet (e.g., if we connected for extraction only)
+		if (!bCaptureSetupDone)
+		{
+			SetupCapture();
+		}
+
+		bExtractionOnlyMode = false; // Clear extraction-only mode
 		bIsStreaming = true;
 		UE_LOG(LogTemp, Log, TEXT("Alakazam: Streaming started"));
 	}
@@ -522,5 +640,111 @@ void UAlakazamController::ProcessReceivedFrame(const void* Data, SIZE_T Size)
 	{
 		UE_LOG(LogTemp, Warning, TEXT("Alakazam: Failed to decompress %s frame (%d bytes)"),
 			Format == EImageFormat::JPEG ? TEXT("JPEG") : TEXT("PNG"), (int32)Size);
+	}
+}
+
+void UAlakazamController::ExtractStyleFromImage(UTexture2D* ReferenceImage)
+{
+	if (!ReferenceImage)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Alakazam: Reference image is null"));
+		return;
+	}
+
+	PendingStyleImage = ReferenceImage;
+	bIsExtractingStyle = true;
+	bExtractionOnlyMode = true;
+
+	if (!IsConnected())
+	{
+		// Auto-connect for extraction only (no streaming)
+		UE_LOG(LogTemp, Log, TEXT("Alakazam: Connecting for style extraction..."));
+		ConnectForExtractionOnly();
+	}
+	else if (State == EAlakazamState::Ready)
+	{
+		// Already connected and ready - send extraction request immediately
+		SendPendingImageForExtraction();
+	}
+	// else: connected but not ready yet - will be handled when "ready" is received
+}
+
+void UAlakazamController::ClearImageStyle()
+{
+	bIsUsingImageStyle = false;
+	bIsExtractingStyle = false;
+	PendingStyleImage = nullptr;
+}
+
+void UAlakazamController::ConnectForExtractionOnly()
+{
+	bExtractionOnlyMode = true;
+	// DON'T setup capture for extraction-only - we don't need it
+
+	// Use the regular Connect() which will handle extraction mode via bExtractionOnlyMode flag
+	Connect();
+}
+
+void UAlakazamController::SendPendingImageForExtraction()
+{
+	if (!PendingStyleImage)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Alakazam: No pending image for extraction"));
+		bIsExtractingStyle = false;
+		return;
+	}
+
+	// Read texture data
+	FTexture2DMipMap& Mip = PendingStyleImage->GetPlatformData()->Mips[0];
+	int32 Width = Mip.SizeX;
+	int32 Height = Mip.SizeY;
+
+	const void* TextureData = Mip.BulkData.LockReadOnly();
+	if (!TextureData)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Alakazam: Failed to lock texture data for extraction"));
+		bIsExtractingStyle = false;
+		PendingStyleImage = nullptr;
+		return;
+	}
+
+	// Encode to JPEG
+	IImageWrapperModule& ImageWrapperModule = FModuleManager::LoadModuleChecked<IImageWrapperModule>(FName("ImageWrapper"));
+	TSharedPtr<IImageWrapper> ImageWrapper = ImageWrapperModule.CreateImageWrapper(EImageFormat::JPEG);
+
+	if (ImageWrapper->SetRaw(TextureData, Width * Height * 4, Width, Height, ERGBFormat::BGRA, 8))
+	{
+		TArray64<uint8> JpegData = ImageWrapper->GetCompressed(90);
+		Mip.BulkData.Unlock();
+
+		if (JpegData.Num() > 0)
+		{
+			// Convert to base64 and send
+			FString Base64Data = FBase64::Encode(JpegData.GetData(), JpegData.Num());
+
+			TSharedPtr<FJsonObject> ImagePromptMsg = MakeShareable(new FJsonObject);
+			ImagePromptMsg->SetStringField(TEXT("type"), TEXT("image_prompt"));
+			ImagePromptMsg->SetStringField(TEXT("image_data"), Base64Data);
+			ImagePromptMsg->SetBoolField(TEXT("enhance"), bEnhancePrompt);
+
+			FString MsgStr;
+			TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&MsgStr);
+			FJsonSerializer::Serialize(ImagePromptMsg.ToSharedRef(), Writer);
+
+			WebSocket->Send(MsgStr);
+			UE_LOG(LogTemp, Log, TEXT("Alakazam: Sent image for style extraction (%lld bytes)"), JpegData.Num());
+		}
+		else
+		{
+			bIsExtractingStyle = false;
+			PendingStyleImage = nullptr;
+		}
+	}
+	else
+	{
+		Mip.BulkData.Unlock();
+		bIsExtractingStyle = false;
+		PendingStyleImage = nullptr;
+		UE_LOG(LogTemp, Error, TEXT("Alakazam: Failed to encode image for extraction"));
 	}
 }
