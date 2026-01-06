@@ -26,6 +26,9 @@ public class AlakazamPortal : ModuleRules
 			}
 		);
 
+		// DesktopPlatform for file dialogs (available in editor and standalone)
+		PrivateDependencyModuleNames.Add("DesktopPlatform");
+
 		if (Target.bBuildEditor)
 		{
 			PrivateDependencyModuleNames.AddRange(
@@ -34,7 +37,8 @@ public class AlakazamPortal : ModuleRules
 					"UnrealEd",
 					"LevelEditor",
 					"EditorStyle",
-					"ToolMenus"
+					"ToolMenus",
+					"PropertyEditor"
 				}
 			);
 		}

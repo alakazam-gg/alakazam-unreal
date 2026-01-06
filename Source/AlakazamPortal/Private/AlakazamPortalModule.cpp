@@ -3,9 +3,12 @@
 
 #if WITH_EDITOR
 #include "AlakazamSetupWizard.h"
+#include "AlakazamControllerDetails.h"
+#include "AlakazamController.h"
 #include "ToolMenus.h"
 #include "LevelEditor.h"
 #include "Containers/Ticker.h"
+#include "PropertyEditorModule.h"
 #endif
 
 #define LOCTEXT_NAMESPACE "FAlakazamPortalModule"
@@ -21,6 +24,13 @@ void FAlakazamPortalModule::StartupModule()
 	UE_LOG(LogTemp, Log, TEXT("Alakazam Portal: Module started"));
 
 #if WITH_EDITOR
+	// Register Details Customization for AlakazamController
+	FPropertyEditorModule& PropertyModule = FModuleManager::LoadModuleChecked<FPropertyEditorModule>("PropertyEditor");
+	PropertyModule.RegisterCustomClassLayout(
+		UAlakazamController::StaticClass()->GetFName(),
+		FOnGetDetailCustomizationInstance::CreateStatic(&FAlakazamControllerDetails::MakeInstance)
+	);
+
 	// Register menu extension after engine init
 	FCoreDelegates::OnPostEngineInit.AddLambda([]()
 	{
@@ -117,6 +127,13 @@ void FAlakazamPortalModule::ShutdownModule()
 	{
 		FTSTicker::GetCoreTicker().RemoveTicker(GSetupWizardTickerHandle);
 		GSetupWizardTickerHandle.Reset();
+	}
+
+	// Unregister Details Customization
+	if (FModuleManager::Get().IsModuleLoaded("PropertyEditor"))
+	{
+		FPropertyEditorModule& PropertyModule = FModuleManager::GetModuleChecked<FPropertyEditorModule>("PropertyEditor");
+		PropertyModule.UnregisterCustomClassLayout(UAlakazamController::StaticClass()->GetFName());
 	}
 
 	UToolMenus::UnRegisterStartupCallback(this);
