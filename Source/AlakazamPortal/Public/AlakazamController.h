@@ -20,6 +20,7 @@ enum class EAlakazamState : uint8
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnAlakazamConnected);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAlakazamFrameReceived, UTexture2D*, StylizedFrame);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAlakazamError, const FString&, ErrorMessage);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnAlakazamStyleExtracted, const FString&, ExtractedPrompt);
 
 /**
  * Alakazam Portal Controller
@@ -82,6 +83,14 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Alakazam|State")
 	bool bIsStreaming = false;
 
+	/** True when extracting style from an image (waiting for server response) */
+	UPROPERTY(BlueprintReadOnly, Category = "Alakazam|State")
+	bool bIsExtractingStyle = false;
+
+	/** True when using a style extracted from an image (not manual text prompt) */
+	UPROPERTY(BlueprintReadOnly, Category = "Alakazam|State")
+	bool bIsUsingImageStyle = false;
+
 	UPROPERTY(BlueprintReadOnly, Category = "Alakazam|Stats")
 	int32 FramesSent = 0;
 
@@ -102,6 +111,9 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Alakazam|Events")
 	FOnAlakazamError OnError;
 
+	UPROPERTY(BlueprintAssignable, Category = "Alakazam|Events")
+	FOnAlakazamStyleExtracted OnStyleExtracted;
+
 	// === Functions ===
 
 	UFUNCTION(BlueprintCallable, Category = "Alakazam")
@@ -112,6 +124,26 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Alakazam")
 	void SetPrompt(const FString& NewPrompt);
+
+	/** Set style from a reference image texture. Server will analyze and extract style. Requires being connected first. */
+	UFUNCTION(BlueprintCallable, Category = "Alakazam")
+	void SetStyleFromImage(UTexture2D* ReferenceImage);
+
+	/** Set style from base64-encoded image data. Requires being connected first. */
+	UFUNCTION(BlueprintCallable, Category = "Alakazam")
+	void SetStyleFromBase64(const FString& Base64ImageData);
+
+	/**
+	 * Extract style from image immediately. Will auto-connect if needed.
+	 * Does NOT start streaming - only extracts the style.
+	 * Use this when you want to pre-extract a style before streaming starts.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Alakazam")
+	void ExtractStyleFromImage(UTexture2D* ReferenceImage);
+
+	/** Clear image style mode and return to text prompt mode. */
+	UFUNCTION(BlueprintCallable, Category = "Alakazam")
+	void ClearImageStyle();
 
 	UFUNCTION(BlueprintCallable, Category = "Alakazam")
 	void StartStreaming();
@@ -140,6 +172,13 @@ private:
 
 	TArray<uint8> ReceiveBuffer;
 
+	// Extraction-only mode state
+	bool bExtractionOnlyMode = false;
+	bool bCaptureSetupDone = false;
+
+	UPROPERTY()
+	UTexture2D* PendingStyleImage = nullptr;
+
 	// Auto-created scene capture for player camera mode
 	UPROPERTY()
 	class USceneCaptureComponent2D* AutoSceneCapture;
@@ -156,4 +195,6 @@ private:
 	void ProcessAsyncReadback();
 	void ProcessReceivedFrame(const void* Data, SIZE_T Size);
 	void SyncCaptureWithPlayerCamera();
+	void ConnectForExtractionOnly();
+	void SendPendingImageForExtraction();
 };
