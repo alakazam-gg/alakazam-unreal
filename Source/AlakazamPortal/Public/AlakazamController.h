@@ -39,7 +39,7 @@ public:
 	// === Configuration ===
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam|Server")
-	FString ServerUrl = TEXT("ws://127.0.0.1:9001");
+	FString ServerUrl = TEXT("ws://35.224.217.144:9001");
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Alakazam|Style")
 	FString Prompt = TEXT("anime style, vibrant colors");

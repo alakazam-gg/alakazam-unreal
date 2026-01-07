@@ -29,7 +29,7 @@ public:
 
 	/** Default server URL */
 	UPROPERTY(config, EditAnywhere, Category = "API", meta = (DisplayName = "Server URL"))
-	FString ServerUrl = TEXT("ws://127.0.0.1:9001");
+	FString ServerUrl = TEXT("ws://35.224.217.144:9001");
 
 	// === Data & Privacy ===
 
